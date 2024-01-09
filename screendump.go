@@ -6,9 +6,8 @@ import (
 	"image"
 	"image/png"
 	"os"
-	//"os/signal"
 	"runtime"
-	"time"
+	"sync"
 
 	"github.com/BurntSushi/xgb"
 	"github.com/BurntSushi/xgb/xproto"
@@ -19,25 +18,33 @@ type persistRequest struct {
 	data     []byte
 }
 
-func persister(pChan <-chan persistRequest) {
-	for {
-		req := <-pChan
+func persister(pChan <-chan persistRequest, doneChan chan<- struct{}) {
+	for req := range pChan {
 		f, err := os.Create(fmt.Sprintf("dumps/%s", req.filename))
-		if err == nil {
-			f.Write(req.data)
-			f.Close()
+		if err != nil {
+			fmt.Printf("Failed to create dumps/%s\n: %s", req.filename, err)
+			continue
 		}
+		defer f.Close()
+
+		_, err = f.Write(req.data)
+		if err != nil {
+			fmt.Printf("Failed to write dumps/%s\n: %s", req.filename, err)
+			continue
+		}
+		f.Close()
 	}
+
+	doneChan <- struct{}{}
 }
 
 type convertRequest struct {
-	data []byte //*xproto.GetImageReply
+	data []byte
 	id   int
 }
 
-func converter(id int, reqChan <-chan convertRequest, persistChan chan<- persistRequest) {
-	for {
-		req := <-reqChan
+func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persistChan chan persistRequest) {
+	for req := range reqChan {
 		data := req.data
 		for i := 0; i < len(data); i += 4 {
 			data[i], data[i+2], data[i+3] = data[i+2], data[i], 255
@@ -51,54 +58,47 @@ func converter(id int, reqChan <-chan convertRequest, persistChan chan<- persist
 			fmt.Println("encode error", err)
 		}
 	}
+	wg.Done()
 }
 
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	numConverters := runtime.NumCPU() - 1
 
-	captureChan := make(chan []byte) //*xproto.GetImageReply)
-
+	doneChan := make(chan struct{})
 	persistChan := make(chan persistRequest, 100)
-	go persister(persistChan)
+	go persister(persistChan, doneChan)
 
+	var convertWg sync.WaitGroup
 	convertChan := make(chan convertRequest, 100)
-	go converter(1, convertChan, persistChan)
-	go converter(2, convertChan, persistChan)
-	go converter(3, convertChan, persistChan)
-	go converter(4, convertChan, persistChan)
-	go converter(5, convertChan, persistChan)
-	go converter(6, convertChan, persistChan)
-
-	done := false
-	go func() {
-		for count := 0; count < 100; count++ {
-			imagereply := <-captureChan
-			convertChan <- convertRequest{imagereply, count}
-		}
-		done = true
-	}()
+	for i := 0; i < numConverters; i++ {
+		convertWg.Add(1)
+		go converter(i, &convertWg, convertChan, persistChan)
+	}
 
 	X, err := xgb.NewConn()
 	if err != nil {
+		fmt.Println(err)
 		return
 	}
 	screen := xproto.Setup(X).DefaultScreen(X)
 
-	// I don't know wtf but it seems like XGB uses channels internally to manage the reply
-	// cookies and the first call to reply always seem to cause a data race. This is obviously
-	// uncool
-	wtf := xproto.GetImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root), 0, 0, 1920, 1080, 0xffffffff)
-	time.Sleep(1 * time.Second)
-	wtf.Reply()
-
-	for !done {
+	for i := 0; i < 100; i++ {
 		cookie := xproto.GetImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root), 0, 0, 1920, 1080, 0xffffffff)
 		fmt.Println(cookie)
 		ximg, err := cookie.Reply()
-		if err == nil {
-			captureChan <- ximg.Data
+		if err != nil {
+			fmt.Printf("cookie reply failed: %s\n", err)
+			continue
 		}
+
+		convertChan <- convertRequest{ximg.Data, i}
 	}
+
+	close(convertChan)
+	convertWg.Wait()
+	close(persistChan)
+
+	<-doneChan
 
 	X.Close()
 }
