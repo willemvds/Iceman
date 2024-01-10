@@ -39,8 +39,10 @@ func persister(pChan <-chan persistRequest, doneChan chan<- struct{}) {
 }
 
 type convertRequest struct {
-	data []byte
-	id   int
+	width  uint16
+	height uint16
+	data   []byte
+	id     int
 }
 
 func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persistChan chan persistRequest) {
@@ -49,7 +51,7 @@ func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persis
 		for i := 0; i < len(data); i += 4 {
 			data[i], data[i+2], data[i+3] = data[i+2], data[i], 255
 		}
-		img := &image.RGBA{data, 4 * 1920, image.Rect(0, 0, 1920, 1080)}
+		img := &image.RGBA{data, 4 * int(req.width), image.Rect(0, 0, int(req.width), int(req.height))}
 		buf := new(bytes.Buffer)
 		err := png.Encode(buf, img)
 		if err == nil {
@@ -81,9 +83,11 @@ func main() {
 		return
 	}
 	screen := xproto.Setup(X).DefaultScreen(X)
+	screenWidth := screen.WidthInPixels
+	screenHeight := screen.HeightInPixels
 
 	for i := 0; i < 100; i++ {
-		cookie := xproto.GetImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root), 0, 0, 1920, 1080, 0xffffffff)
+		cookie := xproto.GetImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root), 0, 0, screenWidth, screenHeight, 0xffffffff)
 		fmt.Println(cookie)
 		ximg, err := cookie.Reply()
 		if err != nil {
@@ -91,7 +95,12 @@ func main() {
 			continue
 		}
 
-		convertChan <- convertRequest{ximg.Data, i}
+		convertChan <- convertRequest{
+			screenWidth,
+			screenHeight,
+			ximg.Data,
+			i,
+		}
 	}
 
 	close(convertChan)
