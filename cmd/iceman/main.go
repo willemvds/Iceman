@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"runtime"
 	"sync"
+	"time"
+
+	"github.com/willemvds/Iceman"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -19,8 +23,11 @@ type persistRequest struct {
 }
 
 func persister(pChan <-chan persistRequest, doneChan chan<- struct{}) {
+	batchId := fmt.Sprintf("%d", time.Now().UnixNano())
+	err := os.MkdirAll(batchId, 0755)
+	fmt.Println("batchId dir err", batchId, err)
 	for req := range pChan {
-		f, err := os.Create(fmt.Sprintf("dumps/%s", req.filename))
+		f, err := os.Create(fmt.Sprintf("%s/%s", batchId, req.filename))
 		if err != nil {
 			fmt.Printf("Failed to create dumps/%s\n: %s", req.filename, err)
 			continue
@@ -42,7 +49,7 @@ type convertRequest struct {
 	width  uint16
 	height uint16
 	data   []byte
-	id     int
+	id     uint
 }
 
 func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persistChan chan persistRequest) {
@@ -55,7 +62,7 @@ func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persis
 		buf := new(bytes.Buffer)
 		err := png.Encode(buf, img)
 		if err == nil {
-			persistChan <- persistRequest{fmt.Sprintf("dump%d (worker %d).png", req.id, id), buf.Bytes()}
+			persistChan <- persistRequest{fmt.Sprintf("%08d.png", req.id), buf.Bytes()}
 		} else {
 			fmt.Println("encode error", err)
 		}
@@ -83,23 +90,24 @@ func main() {
 		return
 	}
 	screen := xproto.Setup(X).DefaultScreen(X)
-	screenWidth := screen.WidthInPixels
-	screenHeight := screen.HeightInPixels
 
-	for i := 0; i < 100; i++ {
-		cookie := xproto.GetImage(X, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root), 0, 0, screenWidth, screenHeight, 0xffffffff)
-		fmt.Println(cookie)
-		ximg, err := cookie.Reply()
-		if err != nil {
-			fmt.Printf("cookie reply failed: %s\n", err)
-			continue
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+	sg := Iceman.NewScreenGrabber(ctx, screen, 30, 30)
+	ssChan, errorsChan := sg.StartCapturing(X)
+
+	go func() {
+		for e := range errorsChan {
+			fmt.Println("Screenshot Error", e)
 		}
+	}()
 
+	for ss := range ssChan {
+		fmt.Println("Screenshot #", ss.Index, ss.RequestedAt, ss.StartedAt, ss.ReceivedAt, ss.ReceivedAt.Sub(ss.RequestedAt), ss.ReceivedAt.Sub(ss.StartedAt))
 		convertChan <- convertRequest{
-			screenWidth,
-			screenHeight,
-			ximg.Data,
-			i,
+			screen.WidthInPixels,
+			screen.HeightInPixels,
+			ss.ImageReply.Data,
+			ss.Index,
 		}
 	}
 
