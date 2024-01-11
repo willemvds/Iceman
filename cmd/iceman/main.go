@@ -29,14 +29,14 @@ func persister(pChan <-chan persistRequest, doneChan chan<- struct{}) {
 	for req := range pChan {
 		f, err := os.Create(fmt.Sprintf("%s/%s", batchId, req.filename))
 		if err != nil {
-			fmt.Printf("Failed to create dumps/%s\n: %s", req.filename, err)
+			fmt.Printf("Failed to create screenshot/%s\n: %s", req.filename, err)
 			continue
 		}
 		defer f.Close()
 
 		_, err = f.Write(req.data)
 		if err != nil {
-			fmt.Printf("Failed to write dumps/%s\n: %s", req.filename, err)
+			fmt.Printf("Failed to write screenshot/%s\n: %s", req.filename, err)
 			continue
 		}
 		f.Close()
@@ -61,17 +61,18 @@ func converter(id int, wg *sync.WaitGroup, reqChan <-chan convertRequest, persis
 		img := &image.RGBA{data, 4 * int(req.width), image.Rect(0, 0, int(req.width), int(req.height))}
 		buf := new(bytes.Buffer)
 		err := png.Encode(buf, img)
-		if err == nil {
-			persistChan <- persistRequest{fmt.Sprintf("%08d.png", req.id), buf.Bytes()}
-		} else {
+		if err != nil {
 			fmt.Println("encode error", err)
+			continue
 		}
+		persistChan <- persistRequest{fmt.Sprintf("%08d.png", req.id), buf.Bytes()}
+
 	}
 	wg.Done()
 }
 
 func main() {
-	numConverters := runtime.NumCPU() - 1
+	numConverters := runtime.NumCPU() - 2
 
 	doneChan := make(chan struct{})
 	persistChan := make(chan persistRequest, 100)
@@ -91,7 +92,7 @@ func main() {
 	}
 	screen := xproto.Setup(X).DefaultScreen(X)
 
-	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 	sg := Iceman.NewScreenGrabber(ctx, screen, 30, 30)
 	ssChan, errorsChan := sg.StartCapturing(X)
 
